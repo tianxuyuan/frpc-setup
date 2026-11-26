@@ -5,13 +5,15 @@ frp 内网穿透客户端一键部署（macOS / Linux），复用已有 frps 服
 
 > 本仓库公开，只含通用工具与文档；部署环境参数（ECS 地址等）运行时经 `--host` 传入，不入库。
 
-## 一键部署（任意新设备，一行命令）
+## 一键部署（任意新设备，一行命令，永久有效）
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/tianxuyuan/frpc-setup/main/setup_frpc.sh) --host <ECS公网IP> --forward 5900/tcp
+bash <(curl -fsSL https://raw.githubusercontent.com/tianxuyuan/frpc-setup/main/setup_frpc.sh)
 ```
 
-首次运行交互提示输入 ECS 密码（不回显、不进历史），推公钥后全自动：端口自动分配（多设备避让）→ 安装 frpc → 开机自启 → 端到端验证 → 打印连接命令。
+命令不含 IP——运行时交互输入**中继机地址**（本机有旧配置可回车保留）、**额外映射端口**（回车跳过仅 SSH），首次再输一次 ECS 密码（不回显、不进历史），之后全自动：端口自动分配（多设备避让）→ 安装 frpc → 开机自启 → 端到端验证 → 打印连接命令。**更换中继机后同一条命令照用**，输新 IP 即自动迁移（旧端口保留）。
+
+预置参数跳过交互（自动化场景）：`bash setup_frpc.sh --host <IP> --forward 5900/tcp`
 
 ## 快速开始（已有本地脚本）
 
