@@ -3,12 +3,13 @@
 # setup_frpc.sh — frp 内网穿透客户端一键部署（可复用 / 幂等 / macOS + Linux）
 #
 # 用法:
-#   bash setup_frpc.sh --host <ECS公网IP> [选项]
-# 一键部署(新设备,含下载;首次交互输入 ECS 密码后全自动):
-#   bash <(curl -fsSL https://raw.githubusercontent.com/tianxuyuan/frpc-setup/main/setup_frpc.sh) --host <ECS公网IP> --forward 5900/tcp
+#   bash setup_frpc.sh [--host <ECS公网IP>] [选项]
+# 一键部署(新设备,含下载;交互输入中继地址+密码后全自动,命令不含IP,换中继机后仍可用):
+#   bash <(curl -fsSL https://raw.githubusercontent.com/tianxuyuan/frpc-setup/main/setup_frpc.sh)
+#   (也可预置参数跳过交互: --host <IP> --forward 5900/tcp)
 #
 # 选项:
-#   --host <ip|域名>      ECS 地址（必填）
+#   --host <ip|域名>      ECS 地址（可选；缺省交互输入，本机有旧配置时可回车保留）
 #   --user <name>         ECS 登录用户（默认 root）
 #   --ssh-port <n>        ECS SSH 端口（默认 22）
 #   --key <path>          SSH 私钥（默认 ~/.ssh/id_ed25519，不存在则自动生成）
@@ -50,8 +51,13 @@ FORWARDS=()
 info() { printf '%s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+tty_src() { # 输出可用的终端输入源；无 TTY（自动化场景）输出空
+  if [ -t 0 ]; then printf '/dev/stdin\n'
+  elif ( : < /dev/tty ) 2>/dev/null; then printf '/dev/tty\n'
+  fi
+}
 
-usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ---------- 参数解析 ----------
 while [ $# -gt 0 ]; do
@@ -68,7 +74,25 @@ while [ $# -gt 0 ]; do
     *) die "未知参数: $1（--help 查看用法）";;
   esac
 done
-[ -n "$HOST" ] || { usage; }
+# ---------- 交互输入（--host 缺省时）：地址 + 可选额外端口，使一行命令不绑定具体 IP ----------
+if [ -z "$HOST" ]; then
+  TTY="$(tty_src)"
+  [ -n "$TTY" ] || usage   # 无 TTY（自动化）且未给 --host → 显示用法退出
+  DEF_HOST="$(sed -n 's/^serverAddr *= *"\(.*\)" *$/\1/p' "$FRP_DIR/frpc.toml" 2>/dev/null | head -1)"
+  printf '请输入中继机器(ECS)公网地址(IP或域名)%s: ' "${DEF_HOST:+ [回车保留 $DEF_HOST]}"
+  IFS= read -r HOST < "$TTY" || true
+  HOST="$(printf '%s' "${HOST:-}" | tr -d '[:space:]')"
+  [ -n "$HOST" ] || HOST="$DEF_HOST"
+  case "$HOST" in
+    ''|*[!A-Za-z0-9.-]*) die "地址非法: '${HOST}'（仅限 IP/域名，不含协议前缀或路径）";;
+  esac
+  info "中继机器地址: $HOST"
+  if [ -z "${FORWARDS[*]+x}" ]; then
+    printf '额外映射的本机端口(如 5900/tcp，多个用空格分隔，回车跳过仅映射 SSH): '
+    IFS= read -r FWD_INPUT < "$TTY" || true
+    for f in ${FWD_INPUT:-}; do FORWARDS+=("$f"); done
+  fi
+fi
 
 # ---------- 环境探测 ----------
 OS="$(uname -s)"
@@ -170,9 +194,7 @@ if rsh true 2>/dev/null; then
 else
   if [ -z "${FRP_ECS_PASSWORD:-}" ] && [ "$DRY_RUN" = 0 ]; then
     # 交互兜底：从终端读密码（不回显、不进 shell 历史），支持 curl 一键部署
-    if [ -t 0 ]; then PW_SRC=/dev/stdin
-    elif ( : < /dev/tty ) 2>/dev/null; then PW_SRC=/dev/tty
-    else PW_SRC=""; fi
+    PW_SRC="$(tty_src)"
     if [ -n "$PW_SRC" ]; then
       info "密钥未授权，请输入 $TARGET 的 SSH 密码（不回显、不落盘，仅用于推送公钥）:"
       IFS= read -rs FRP_ECS_PASSWORD < "$PW_SRC" || true
