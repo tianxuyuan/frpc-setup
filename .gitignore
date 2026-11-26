@@ -1,0 +1,8 @@
+# 运行时产物绝不入库（含 token/设备标签/日志）
+frpc.toml
+frpc.toml.bak.*
+device_tag
+*.log
+setup-cache/
+# 部署环境事实（ECS 地址/映射清单等）仅存本地，禁止入库
+ENVIRONMENT.local.md
