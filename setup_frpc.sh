@@ -29,6 +29,8 @@
 #       删除映射请手动编辑 ~/frp/frpc.toml 后重跑本脚本。
 # 多设备: 唯一设备标签 + 端口自动避让；ECS 端 /etc/frp/allocations.tsv 登记簿
 #       使离线设备的端口也受保护（部署成功后自动创建/更新，不修改 frps.toml）。
+# 迁移: --host 变化时自动备份旧配置，旧端口优先原样保留（新服务器上被占/越界才改）；
+#       新 ECS 无 frps 时自动安装并生成配置（token/allowPorts/systemd）。
 #
 # 唯一可能的手动步骤: 阿里云安全组放行新分配的远程端口（脚本会检测并提示）。
 # ============================================================================
@@ -49,7 +51,7 @@ info() { printf '%s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ---------- 参数解析 ----------
 while [ $# -gt 0 ]; do
@@ -365,34 +367,43 @@ if [ -z "$DEVICE_NAME" ]; then
 fi
 info "设备标签: $DEVICE_NAME"
 
-# 解析已有配置（仅当指向同一服务器时保留，实现幂等）
+# 解析已有配置：同一服务器 → 幂等复用；不同服务器 → 迁移模式（备份旧配置，旧端口优先保留）
+MIGRATING=0
 : > "$WORK/existing.tsv"
 if [ -f "$CONF" ]; then
   OLD_ADDR="$(sed -n 's/^serverAddr *= *"\(.*\)" *$/\1/p' "$CONF")"
-  if [ "$OLD_ADDR" = "$HOST" ]; then
-    awk '
-      function val(l){ sub(/^[^=]*= */,"",l); gsub(/"/,"",l); sub(/ *$/,"",l); return l }
-      function flush(){ if(name!="") printf "%s\t%s\t%s\t%s\n",name,type,lp,rp }
-      /^\[\[proxies\]\]/ { flush(); name="";type="";lp="";rp=""; next }
-      /^name[ \t]*=/       { name=val($0) }
-      /^type[ \t]*=/       { type=val($0) }
-      /^localPort[ \t]*=/  { lp=val($0) }
-      /^remotePort[ \t]*=/ { rp=val($0) }
-      END { flush() }
-    ' "$CONF" > "$WORK/existing.tsv"
+  if [ "$OLD_ADDR" != "$HOST" ]; then
+    MIGRATING=1
+    [ "$DRY_RUN" = 1 ] || cp "$CONF" "$CONF.bak.$(date +%Y%m%d%H%M%S)"
+    warn "已有配置指向其他服务器($OLD_ADDR)，已备份为 $CONF.bak.*；迁移模式：旧端口将在新服务器优先保留"
+  fi
+  awk '
+    function val(l){ sub(/^[^=]*= */,"",l); gsub(/"/,"",l); sub(/ *$/,"",l); return l }
+    function flush(){ if(name!="") printf "%s\t%s\t%s\t%s\n",name,type,lp,rp }
+    /^\[\[proxies\]\]/ { flush(); name="";type="";lp="";rp=""; next }
+    /^name[ \t]*=/       { name=val($0) }
+    /^type[ \t]*=/       { type=val($0) }
+    /^localPort[ \t]*=/  { lp=val($0) }
+    /^remotePort[ \t]*=/ { rp=val($0) }
+    END { flush() }
+  ' "$CONF" > "$WORK/existing.tsv"
+  if [ "$MIGRATING" = 0 ]; then
     info "检测到已有配置（同一服务器），保留全部现有映射"
   else
-    cp "$CONF" "$CONF.bak.$(date +%Y%m%d%H%M%S)"
-    warn "已有配置指向其他服务器($OLD_ADDR)，已备份为 $CONF.bak.*，按新设备处理"
+    info "迁移模式: $(wc -l < "$WORK/existing.tsv" | tr -d ' ') 条旧映射，旧端口优先原样保留"
   fi
 fi
 
-# 已占用 = ECS 实际监听端口 ∪ 本机已有配置保留的远程端口 ∪ 登记簿全部端口（含离线设备）。
-# 已有映射经 existing_rp 幂等复用、不走 pick_port，故本机保留端口必须留在占用集中，
-# 否则新映射会分配到与现有映射相同的 remotePort（frps 拒绝端口重复的代理）。
+# 已占用 = ECS 实际监听端口 ∪ 登记簿全部端口（含离线设备）。
+# 同一服务器: 再并入本机已有配置保留的远程端口（幂等复用不走 pick_port，须防新映射撞旧端口）。
+# 迁移模式: 旧端口在新服务器上不构成占用，不入占用集；由 add_proxy/保留循环逐条校验并优先复用。
 awk -F'\t' '{print $4}' "$WORK/existing.tsv" | sort -un > "$WORK/ours.txt"
 awk -F'\t' 'NF>=4{print $4}' "$WORK/registry.tsv" | sort -un > "$WORK/registry_ports.txt"
-sort -un "$WORK/used_tcp.txt" "$WORK/used_udp.txt" "$WORK/ours.txt" "$WORK/registry_ports.txt" > "$WORK/taken_all.txt"
+if [ "$MIGRATING" = 1 ]; then
+  sort -un "$WORK/used_tcp.txt" "$WORK/used_udp.txt" "$WORK/registry_ports.txt" > "$WORK/taken_all.txt"
+else
+  sort -un "$WORK/used_tcp.txt" "$WORK/used_udp.txt" "$WORK/ours.txt" "$WORK/registry_ports.txt" > "$WORK/taken_all.txt"
+fi
 # 分配策略: 端口号被任一设备的 TCP 或 UDP 占用即不再分配给新映射，
 #           避免跨协议/跨设备同号歧义；同一服务的 TCP+UDP 成对分配同号。
 
@@ -418,6 +429,18 @@ existing_rp() { # existing_rp <type> <localPort> → 已有映射的 remotePort�
 existing_name() {
   awk -F'\t' -v t="$1" -v l="$2" '$2==t && $3==l {print $1; exit}' "$WORK/existing.tsv"
 }
+migration_validate() { # migration_validate <type> <localPort> <oldRP> → 输出最终 remotePort
+  # 同一 localPort 的 TCP+UDP 是成对服务: 另一协议已处理则跟随其端口（保持成对同号）；
+  # 否则独立校验: 旧端口在 allowPorts 内且未被占 → 原样保留，不然重新分配。
+  local t="$1" l="$2" r="$3" pair
+  pair="$(awk -F'|' -v l="$l" '$3==l{print $4; exit}' "$WORK/proxies.txt")"
+  if [ -n "$pair" ]; then printf '%s\n' "$pair"; return 0; fi
+  if ! in_ranges "$r" || port_taken "$r"; then
+    r="$(pick_port "$r")" || die "allowPorts 范围内没有空闲端口可分配（${t}/${l}）"
+  fi
+  printf '%s\n' "$r" >> "$WORK/taken_all.txt"
+  printf '%s\n' "$r"
+}
 
 # 待生成代理列表: name|type|localPort|remotePort
 : > "$WORK/proxies.txt"
@@ -426,6 +449,9 @@ add_proxy() { # add_proxy <type> <localPort> <preferredRP> <defaultName>
   rp="$(existing_rp "$type" "$lp")"
   if [ -n "$rp" ]; then
     name="$(existing_name "$type" "$lp")"
+    if [ "$MIGRATING" = 1 ]; then
+      rp="$(migration_validate "$type" "$lp" "$rp")"
+    fi
   else
     rp="$(pick_port "$pref")" || die "allowPorts 范围内没有空闲端口可分配（${type}/${lp}）"
     name="$dname"
@@ -461,10 +487,14 @@ for f in ${FORWARDS[@]+"${FORWARDS[@]}"}; do
     *) die "--forward 协议非法: ${f}（可选 /tcp /udp /both）";;
   esac
 done
-# 保留已有配置中本次未请求的映射（幂等，不丢映射）
+# 保留已有配置中本次未请求的映射（幂等，不丢映射；迁移模式逐条校验旧端口）
 while IFS=$'\t' read -r name type lp rp; do
   [ -n "$name" ] || continue
-  grep -q "^$name|" "$WORK/proxies.txt" || printf '%s|%s|%s|%s\n' "$name" "$type" "$lp" "$rp" >> "$WORK/proxies.txt"
+  if grep -q "^$name|" "$WORK/proxies.txt"; then continue; fi
+  if [ "$MIGRATING" = 1 ]; then
+    rp="$(migration_validate "$type" "$lp" "$rp")"
+  fi
+  printf '%s|%s|%s|%s\n' "$name" "$type" "$lp" "$rp" >> "$WORK/proxies.txt"
 done < "$WORK/existing.tsv"
 
 # 生成配置（token 脱敏显示）
