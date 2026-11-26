@@ -11,7 +11,7 @@ description: 在新设备上一键搭建 frp 内网穿透客户端（frpc）隧�
 ## 执行步骤
 
 1. **收集信息**（缺什么问什么，已知则不问）：
-   - ECS 公网地址（必需；必须向用户确认，不要默认。本机历史部署参数见 `ENVIRONMENT.local.md`，该文件不入库）
+   - ECS 公网地址（`--host` 可省略：脚本交互提示输入，本机有旧配置时回车保留默认；自动化场景必须传 `--host`。须向用户确认地址，不要默认。本机历史部署参数见 `ENVIRONMENT.local.md`，该文件不入库）
    - ECS 登录用户（默认 root）与 SSH 端口（默认 22）
    - 认证方式，按优先级：
      a. 本机已有可登录该 ECS 的 SSH 密钥 → 直接跑
@@ -66,8 +66,9 @@ description: 在新设备上一键搭建 frp 内网穿透客户端（frpc）隧�
 仓库：`tianxuyuan/frpc-setup`（**公开**，只含通用工具与文档；ECS 地址/映射清单等部署环境参数剥离在各机 `ENVIRONMENT.local.md`，不入库——SPEC1）。
 
 ```bash
-# 任意新设备一键部署（含下载；首次交互输入 ECS 密码后全自动）
-bash <(curl -fsSL https://raw.githubusercontent.com/tianxuyuan/frpc-setup/main/setup_frpc.sh) --host <ECS公网IP> [--forward <端口>[/tcp|/udp|/both]]...
+# 任意新设备一键部署（含下载；交互输入中继地址+端口+密码后全自动，命令不含 IP，换机仍可用）
+bash <(curl -fsSL https://raw.githubusercontent.com/tianxuyuan/frpc-setup/main/setup_frpc.sh)
+# 自动化/跳过交互：--host <ECS公网IP> [--forward <端口>[/tcp|/udp|/both]]...
 # 有 Claude Code 的设备：克隆为 skill
 git clone https://github.com/tianxuyuan/frpc-setup.git ~/.claude/skills/frpc-setup
 # 更新到最新版
